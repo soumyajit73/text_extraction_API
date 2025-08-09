@@ -1,0 +1,59 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Clerk Auth Centered</title>
+    <style>
+      html,
+      body {
+        height: 100%;
+        margin: 0;
+        padding: 0;
+      }
+      body {
+        font-family: Arial, sans-serif;
+        height: 100vh;
+        display: flex;
+        flex-direction: column;
+        justify-content: center;
+        align-items: center;
+        text-align: center;
+        background: #f9f9f9;
+      }
+      #auth-container {
+        margin-top: 20px;
+      }
+    </style>
+  </head>
+  <body>
+    <h1>Clerk Authentication</h1>
+
+    <!-- Auth container -->
+    <div id="auth-container"></div>
+
+    <!-- Load Clerk -->
+    <script
+      crossorigin="anonymous"
+      data-clerk-publishable-key="pk_test_cnVsaW5nLWV3ZS04OS5jbGVyay5hY2NvdW50cy5kZXYk"
+      src="https://cdn.jsdelivr.net/npm/@clerk/clerk-js@latest/dist/clerk.browser.js"
+    ></script>
+
+    <script>
+      window.addEventListener("load", async () => {
+        const clerk = window.Clerk;
+        await clerk.load();
+
+        if (clerk.user) {
+          await clerk.signOut(); // force logout on page load for testing
+        }
+
+        const container = document.getElementById("auth-container");
+        clerk.mountSignIn(container, {
+          signUpUrl: "frontend/index.html",
+          afterSignInUrl: "chat.html",
+        });
+      });
+    </script>
+  </body>
+</html>

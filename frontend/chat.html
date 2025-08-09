@@ -1,0 +1,172 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title> Chat UI</title>
+  <style>
+    body {
+      font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+      background: #121212;
+      color: #e0e0e0;
+      margin: 0;
+      height: 100vh;
+      display: flex;
+      justify-content: center;
+      align-items: flex-start;
+      padding: 40px 20px;
+      position: relative;
+    }
+
+    /* Back to login link */
+    .back-login {
+      position: fixed;
+      top: 20px;
+      right: 20px;
+      color: #00ffa2;
+      font-weight: 600;
+      text-decoration: none;
+      font-size: 0.95rem;
+      transition: color 0.3s ease;
+      z-index: 10;
+    }
+    .back-login:hover {
+      color: #00cc7a;
+    }
+
+    .container {
+      background: #1e1e1e;
+      width: 600px;
+      border-radius: 12px;
+      padding: 30px;
+      box-shadow: 0 8px 24px rgb(0 0 0 / 0.7);
+      display: flex;
+      flex-direction: column;
+      gap: 20px;
+    }
+
+    h1 {
+      margin: 0 0 10px 0;
+      font-weight: 700;
+      font-size: 1.8rem;
+      color: #00ffa2;
+    }
+
+    label {
+      font-size: 0.9rem;
+      margin-bottom: 6px;
+      color: #a0a0a0;
+    }
+
+    input[type="file"] {
+      color: #fff;
+    }
+
+    textarea {
+      width: 100%;
+      height: 100px;
+      border-radius: 8px;
+      border: none;
+      padding: 12px;
+      background: #2c2c2c;
+      color: #fff;
+      font-size: 1rem;
+      resize: vertical;
+      box-sizing: border-box;
+      font-family: inherit;
+    }
+
+    button {
+      align-self: flex-start;
+      background: #00ffa2;
+      color: #121212;
+      font-weight: 700;
+      border: none;
+      border-radius: 8px;
+      padding: 12px 24px;
+      cursor: pointer;
+      font-size: 1rem;
+      transition: background 0.3s ease;
+    }
+    button:hover {
+      background: #00cc7a;
+    }
+
+    .output {
+      background: #222;
+      min-height: 150px;
+      border-radius: 8px;
+      padding: 16px;
+      white-space: pre-wrap;
+      font-family: monospace;
+      font-size: 0.95rem;
+      overflow-y: auto;
+      color: #00ffa2;
+    }
+  </style>
+</head>
+<body>
+
+  <a href="index.html" class="back-login">← Back to Login</a>
+
+  <div class="container">
+    <h1>Chat AI</h1>
+
+    <div>
+      <label for="fileInput">Upload file</label><br />
+      <input type="file" id="fileInput" />
+    </div>
+
+    <div>
+      <label for="promptInput">Enter your prompt</label><br />
+      <textarea id="promptInput" placeholder="Ask something about your file..."></textarea>
+    </div>
+
+    <button id="submitBtn">Submit</button>
+
+    <div class="output" id="outputArea">Output will appear here...</div>
+  </div>
+
+  <script>
+    const fileInput = document.getElementById('fileInput');
+    const promptInput = document.getElementById('promptInput');
+    const submitBtn = document.getElementById('submitBtn');
+    const outputArea = document.getElementById('outputArea');
+
+    submitBtn.addEventListener('click', async () => {
+      if (!fileInput.files.length) {
+        alert('Please upload a file first.');
+        return;
+      }
+      if (!promptInput.value.trim()) {
+        alert('Please enter a prompt.');
+        return;
+      }
+
+      outputArea.textContent = 'Processing...';
+
+      const formData = new FormData();
+      formData.append('file', fileInput.files[0]);
+      formData.append('prompt', promptInput.value);
+
+      try {
+        const response = await fetch('/api/process', {
+          method: 'POST',
+          body: formData,
+        });
+
+        if (!response.ok) {
+          const errorData = await response.json();
+          outputArea.textContent = 'Error: ' + (errorData.error || 'Unknown error');
+          return;
+        }
+
+        const data = await response.json();
+        outputArea.textContent = data.output || 'No output received.';
+      } catch (err) {
+        outputArea.textContent = 'Error: ' + err.message;
+      }
+    });
+  </script>
+</body>
+</html>
