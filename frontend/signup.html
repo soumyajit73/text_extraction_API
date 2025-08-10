@@ -1,0 +1,54 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Sign Up</title>
+  <style>
+    html, body {
+      height: 100%;
+      margin: 0;
+      padding: 0;
+    }
+    
+    body {
+      font-family: Arial, sans-serif;
+      display: flex;
+      flex-direction: column;
+      justify-content: center;
+      align-items: center;
+      background: #f9f9f9;
+    }
+
+    h1 {
+      margin-bottom: 2rem;
+    }
+
+    #auth-container {
+      margin-top: 20px;
+    }
+  </style>
+</head>
+<body>
+  <h1>Sign Up</h1>
+  <div id="auth-container"></div>
+
+  <script crossorigin="anonymous"
+    data-clerk-publishable-key="pk_test_cnVsaW5nLWV3ZS04OS5jbGVyay5hY2NvdW50cy5kZXYk"
+    src="https://cdn.jsdelivr.net/npm/@clerk/clerk-js@latest/dist/clerk.browser.js">
+  </script>
+
+  <script>
+    window.addEventListener("load", async () => {
+      const clerk = window.Clerk;
+      await clerk.load();
+      const container = document.getElementById("auth-container");
+
+      clerk.mountSignUp(container, {
+        signInUrl: "index.html",
+        afterSignUpUrl: "chat.html"
+      });
+    });
+  </script>
+</body>
+</html>
