@@ -1,39 +1,37 @@
 import express from "express";
 import path from "path";
 import { fileURLToPath } from "url";
-import { ClerkExpressRequireAuth } from "@clerk/clerk-sdk-node";
 import multer from "multer";
 import fetch from "node-fetch";
 import dotenv from "dotenv";
-import pdfParse from "pdf-parse";
-import fs from "fs";
+import fs from "fs/promises";
 
 dotenv.config();
 
 const app = express();
 app.use(express.json());
 
-// Fix __dirname in ES modules
+// Helper for ES Modules to get __dirname and __filename
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
-// Create data directory structure
+// Ensure data directories exist
 const dataDir = path.join(__dirname, "data");
 const uploadsDir = path.join(dataDir, "uploads");
 
-// Ensure directories exist
-[dataDir, uploadsDir].forEach((dir) => {
-  if (!fs.existsSync(dir)) {
-    fs.mkdirSync(dir, { recursive: true });
+[dataDir, uploadsDir].forEach(async (dir) => {
+  try {
+    await fs.mkdir(dir, { recursive: true });
+  } catch (err) {
+    console.error(`Error creating directory ${dir}:`, err);
   }
 });
 
-// Multer config with disk storage
+// Configure Multer for file storage and filtering
 const storage = multer.diskStorage({
-  destination: (req, file, cb) => {
-    cb(null, uploadsDir);
-  },
+  destination: (req, file, cb) => cb(null, uploadsDir),
   filename: (req, file, cb) => {
+    // Sanitize filename to prevent path traversal and other issues
     const sanitizedName = file.originalname.replace(/[^a-zA-Z0-9.-]/g, "_");
     cb(null, `${Date.now()}-${sanitizedName}`);
   },
@@ -42,162 +40,125 @@ const storage = multer.diskStorage({
 const upload = multer({
   storage,
   fileFilter: (req, file, cb) => {
-    if (file.mimetype === "application/pdf") {
+    // Update file filter to accept common image MIME types
+    if (file.mimetype.startsWith("image/")) {
       cb(null, true);
     } else {
-      cb(new Error("Only PDF files are allowed!"), false);
+      cb(new Error("Only image files are allowed."), false);
     }
   },
   limits: { fileSize: 5 * 1024 * 1024 }, // 5MB limit
 });
 
-// Serve static files from frontend folder
+// Serve static frontend files
 app.use(express.static(path.join(__dirname, "..", "frontend")));
 
-// Root route serves index.html
 app.get("/", (req, res) => {
   res.sendFile(path.join(__dirname, "..", "frontend", "index.html"));
 });
 
-// Health check
+// Basic health check endpoint
 app.get("/health", (req, res) => {
   res.json({ status: "healthy", timestamp: new Date().toISOString() });
 });
 
-// Protected route with Clerk
-app.get("/protected", ClerkExpressRequireAuth(), (req, res) => {
-  res.json({ message: "You are authenticated!", userId: req.auth.userId });
-});
-
+// Groq API configuration
 const GROQ_API_KEY = process.env.GROQ_API_KEY;
-const GROQ_API_ENDPOINT =
-  "https://api.groq.com/openai/v1/chat/completions";
+const GROQ_API_ENDPOINT = "https://api.groq.com/openai/v1/chat/completions";
 
-// Error handler
+// Generic error handler middleware
 const errorHandler = (err, req, res, next) => {
   console.error("Error:", err);
-  res.status(500).json({
-    error: "Something went wrong!",
-    message:
-      process.env.NODE_ENV === "development"
-        ? err.message
-        : "Internal server error",
-    path: err.path,
-  });
+  if (err instanceof multer.MulterError) {
+    return res.status(400).json({ error: `File upload error: ${err.message}` });
+  }
+  res.status(500).json({ error: err.message || "Internal Server Error" });
 };
 
-
-// Process PDF
+// Main API endpoint to process the image and call the Groq API
 app.post("/api/process", upload.single("file"), async (req, res, next) => {
-  let filePath = null;
+  let filePath;
+
   try {
-    // If no file uploaded, use the default pdf-parse test file
-    if (!req.file) {
-      console.log("No file uploaded, using default test PDF...");
-      filePath = path.join(
-        __dirname,
-        "node_modules",
-        "pdf-parse",
-        "test",
-        "data",
-        "05-versions-space.pdf"
-      );
-    } else {
-      filePath = path.resolve(req.file.path);
-      console.log("Processing uploaded PDF:", filePath);
+    filePath = req.file?.path;
+    if (!filePath) {
+      throw new Error("No file uploaded.");
     }
 
-    if (!fs.existsSync(filePath)) {
-      throw new Error(`File not found: ${filePath}`);
-    }
-
-    const prompt = req.body.prompt || "No prompt provided";
-    const pdfBuffer = await fs.promises.readFile(filePath);
-    const pdfData = await pdfParse(pdfBuffer);
-    const resumeText = pdfData.text;
-
-    // Delete uploaded file if it exists and isn't the default
-    if (req.file) {
-      try {
-        await fs.promises.unlink(filePath);
-        console.log("Deleted uploaded file:", filePath);
-      } catch (unlinkError) {
-        console.error("Error deleting file:", unlinkError);
+    const prompt = "Extract all text from the provided image. Respond with only the extracted text, nothing else. Do not add any introductory or concluding sentences or conversational filler. Provide only the raw text.";
+    
+    const imageBuffer = await fs.readFile(filePath);
+    const base64Image = imageBuffer.toString("base64");
+    
+    const messages = [
+      {
+        role: "system",
+        content: "You are a highly efficient text extraction assistant. Your sole purpose is to extract and return text from an image. You must not add any commentary, explanations, or conversational text. Your response should be nothing but the extracted text."
+      },
+      {
+        role: "user",
+        content: [
+          { type: "text", text: prompt },
+          {
+            type: "image_url",
+            image_url: { url: `data:${req.file.mimetype};base64,${base64Image}` }
+          }
+        ]
       }
-    }
+    ];
 
-    const combinedPrompt = `Here is the resume text:\n${resumeText}\n\nUser's question:\n${prompt}`;
-
+    // **This is the part that was missing and has been added.**
     const requestBody = {
       model: "meta-llama/llama-4-scout-17b-16e-instruct",
-      messages: [{ role: "user", content: combinedPrompt }],
-      temperature: 0.7,
-      max_completion_tokens: 1024,
-      top_p: 1,
-      stream: false,
-      stop: null,
+      messages: messages,
+      temperature: 0,
+      max_tokens: 1024,
     };
-
-   
-    console.log(" Sending request to Groq API with model:", requestBody.model);
+    
+    console.log("🚀 Sending request to Groq API...");
 
     const groqResponse = await fetch(GROQ_API_ENDPOINT, {
       method: "POST",
       headers: {
-        Authorization: `Bearer ${GROQ_API_KEY}`,
-        "Content-Type": "application/json",
+        "Authorization": `Bearer ${GROQ_API_KEY}`,
+        "Content-Type": "application/json"
       },
       body: JSON.stringify(requestBody),
     });
 
     if (!groqResponse.ok) {
       const errorText = await groqResponse.text();
-      console.error("Groq API Error:", errorText);
-      return res
-        .status(groqResponse.status)
-        .json({ error: "API Error", details: errorText });
+      throw new Error(`Groq API Error: ${groqResponse.status} - ${errorText}`);
     }
 
     const data = await groqResponse.json();
-
-    
-    console.log(" Full Groq API Response:", JSON.stringify(data, null, 2));
-
     const outputText = data.choices?.[0]?.message?.content;
-    console.log(" Extracted Output Text:", outputText); 
 
-    if (!outputText) throw new Error("Invalid response from Groq API");
+    if (!outputText) {
+      throw new Error("Invalid response or missing content from Groq API.");
+    }
 
     res.json({ success: true, output: outputText });
+
   } catch (error) {
-    if (req.file && fs.existsSync(filePath)) {
+    next(error);
+  } finally {
+    if (filePath) {
       try {
-        await fs.promises.unlink(filePath);
-      } catch (cleanupError) {
-        console.error("Cleanup error:", cleanupError);
+        await fs.unlink(filePath);
+        console.log(`Cleaned up file: ${filePath}`);
+      } catch (err) {
+        if (err.code !== 'ENOENT') {
+          console.error(`Error cleaning up file ${filePath}:`, err);
+        }
       }
     }
-    next(error);
   }
 });
-
-
+// Use the generic error handler
 app.use(errorHandler);
 
 const PORT = process.env.PORT || 5000;
-const server = app.listen(PORT, () => {
-  console.log(`Server running at http://localhost:${PORT}`);
-  console.log(`Environment: ${process.env.NODE_ENV || "development"}`);
-  console.log(`Uploads directory: ${uploadsDir}`);
-});
-
-// Graceful shutdown
-process.on("SIGTERM", () => {
-  console.log("SIGTERM received, closing server");
-  server.close(() => process.exit(0));
-});
-
-process.on("uncaughtException", (error) => {
-  console.error("Uncaught Exception:", error);
-  server.close(() => process.exit(1));
+app.listen(PORT, () => {
+  console.log(`✅ Server running at http://localhost:${PORT}`);
 });
