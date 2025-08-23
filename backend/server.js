@@ -2,12 +2,10 @@ import express from "express";
 import path from "path";
 import { fileURLToPath } from "url";
 import multer from "multer";
-import fetch from "node-fetch";
 import dotenv from "dotenv";
 import fs from "fs/promises";
-import pdf from "pdf-parse";
-import Poppler from "pdf-poppler";
-import os from "os";
+import fetch from "node-fetch";
+import FormData from "form-data";
 
 dotenv.config();
 
@@ -17,222 +15,222 @@ app.use(express.json());
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
+// ---------- Folders ----------
 const dataDir = path.join(__dirname, "data");
 const uploadsDir = path.join(dataDir, "uploads");
-// Temporary directory for converted PDF images
-const tempDir = os.tmpdir();
 
 (async () => {
-  try {
-    await fs.mkdir(dataDir, { recursive: true });
-    await fs.mkdir(uploadsDir, { recursive: true });
-    console.log("Data directories created successfully.");
-  } catch (err) {
-    console.error(`Error creating directories:`, err);
-  }
-})();
+  await fs.mkdir(uploadsDir, { recursive: true });
+  console.log("📂 Directories ready:", uploadsDir);
+})().catch((e) => console.error("Dir init error:", e));
 
+// ---------- Multer ----------
 const storage = multer.diskStorage({
-  destination: (req, file, cb) => cb(null, uploadsDir),
-  filename: (req, file, cb) => {
-    const sanitizedName = file.originalname.replace(/[^a-zA-Z0-9.-]/g, "_");
-    cb(null, `${Date.now()}-${sanitizedName}`);
+  destination: (_req, _file, cb) => cb(null, uploadsDir),
+  filename: (_req, file, cb) => {
+    const safe = file.originalname.replace(/[^a-zA-Z0-9.-]/g, "_");
+    cb(null, `${Date.now()}-${safe}`);
   },
 });
-
 const upload = multer({
   storage,
-  fileFilter: (req, file, cb) => {
-    if (file.mimetype.startsWith("image/") || file.mimetype === "application/pdf") {
-      cb(null, true);
-    } else {
-      cb(new Error("Only image and PDF files are allowed."), false);
-    }
+  fileFilter: (_req, file, cb) => {
+    if (file.mimetype.startsWith("image/") || file.mimetype === "application/pdf") cb(null, true);
+    else cb(new Error("Only image and PDF files are allowed."), false);
   },
-  limits: { fileSize: 10 * 1024 * 1024 },
+  limits: { fileSize: 25 * 1024 * 1024 },
 });
 
+// ---------- Static Frontend ----------
 app.use(express.static(path.join(__dirname, "..", "frontend")));
-
-app.get("/", (req, res) => {
+app.get("/", (_req, res) => {
   res.sendFile(path.join(__dirname, "..", "frontend", "index.html"));
 });
 
-app.get("/health", (req, res) => {
+// ---------- Health ----------
+app.get("/health", (_req, res) => {
   res.json({ status: "healthy", timestamp: new Date().toISOString() });
 });
 
-const GROQ_API_KEY = process.env.GROQ_API_KEY;
-const GROQ_API_ENDPOINT = "https://api.groq.com/openai/v1/chat/completions";
+// ---------- LlamaParse HTTP API Functions ----------
+const uploadFileToLlamaParse = async (filePath, fileName) => {
+  try {
+    const formData = new FormData();
+    const fileBuffer = await fs.readFile(filePath);
+    
+    formData.append('file', fileBuffer, fileName);
+    formData.append('parse_mode', 'parse_page_with_agent');
+    formData.append('model', 'openai-gpt-4-1-mini');
+    formData.append('high_res_ocr', 'true');
+    formData.append('adaptive_long_table', 'true');
+    formData.append('outlined_table_extraction', 'true');
+    formData.append('output_tables_as_HTML', 'true');
+    formData.append('page_separator', '\n\n---\n\n');
 
-const errorHandler = (err, req, res, next) => {
-  console.error("Error:", err);
-  if (err instanceof multer.MulterError) {
-    return res.status(400).json({ error: `File upload error: ${err.message}` });
+    const response = await fetch('https://api.cloud.llamaindex.ai/api/v1/parsing/upload', {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${process.env.LLAMA_CLOUD_API_KEY}`,
+        ...formData.getHeaders()
+      },
+      body: formData,
+    });
+
+    const responseText = await response.text();
+    if (!response.ok) {
+      throw new Error(`Upload failed (${response.status}): ${responseText}`);
+    }
+
+    const result = JSON.parse(responseText);
+    console.log('File uploaded successfully. Job ID:', result.id);
+    return result.id;
+  } catch (error) {
+    console.error('Upload error:', error);
+    throw error;
   }
+};
+
+const pollForResult = async (jobId) => {
+  const maxAttempts = 60; // 5 minutes max wait
+  let attempts = 0;
+
+  while (attempts < maxAttempts) {
+    await new Promise(resolve => setTimeout(resolve, 5000)); // Wait 5 seconds
+    
+    console.log(`Polling for job ${jobId} - Attempt ${attempts + 1}/${maxAttempts}`);
+    
+    const response = await fetch(`https://api.cloud.llamaindex.ai/api/v1/parsing/job/${jobId}/result/markdown`, {
+      method: 'GET',
+      headers: {
+        'Authorization': `Bearer ${process.env.LLAMA_CLOUD_API_KEY}`,
+      },
+    });
+
+    if (response.ok) {
+      const result = await response.json();
+      console.log('Parsing completed!');
+      return result.markdown;
+    } else if (response.status === 400) {
+      const error = await response.json();
+      if (error.detail === 'Job not completed yet') {
+        attempts++;
+        continue;
+      } else {
+        throw new Error(`Error: ${JSON.stringify(error)}`);
+      }
+    } else {
+      const errorText = await response.text();
+      throw new Error(`Error checking job status (${response.status}): ${errorText}`);
+    }
+  }
+  
+  throw new Error('Parsing timeout - job took too long to complete');
+};
+
+// ---------- Error handler ----------
+const errorHandler = (err, _req, res, _next) => {
+  console.error("❌ Error:", err);
+  if (err instanceof multer.MulterError) return res.status(400).json({ error: err.message });
   res.status(500).json({ error: err.message || "Internal Server Error" });
 };
 
+// ---------- Main API ----------
 app.post("/api/process", upload.single("file"), async (req, res, next) => {
   let filePath;
-  let tempImagePath;
-
   try {
-    const prompt = req.body.prompt;
+    const prompt = req.body?.prompt?.toString?.().trim();
     const file = req.file;
     filePath = file?.path;
 
-    if (!file) {
-      throw new Error("No file uploaded.");
+    if (!file) throw new Error("No file uploaded.");
+    if (!prompt) throw new Error("No prompt provided.");
+
+    // Check if API keys are set
+    if (!process.env.LLAMA_CLOUD_API_KEY) {
+      throw new Error("LLAMA_CLOUD_API_KEY is not set in environment variables");
     }
-    if (!prompt) {
-      throw new Error("No prompt provided.");
+    if (!process.env.GROQ_API_KEY) {
+      throw new Error("GROQ_API_KEY is not set in environment variables");
     }
 
-    let messages;
+    // Upload file to LlamaParse and get job ID
+    const jobId = await uploadFileToLlamaParse(filePath, file.originalname);
     
-    if (file.mimetype === "application/pdf") {
-      console.log("Processing PDF file...");
-      const pdfBuffer = await fs.readFile(filePath);
-      const data = await pdf(pdfBuffer);
-      const extractedText = data.text;
+    // Poll for results
+    const parsedContent = await pollForResult(jobId);
 
-      if (extractedText && extractedText.trim().length > 0) {
-        // Case 1: The PDF has a text layer, so we use the extracted text.
-        console.log("PDF contains a text layer. Analyzing text...");
-        messages = [
-          {
-            role: "system",
-            content: "You are a text analysis assistant. Your sole purpose is to analyze the provided text based on the user's prompt. You must not add any commentary, explanations, or conversational text unless explicitly asked."
-          },
-          {
-            role: "user",
-            content: [
-              { type: "text", text: `Prompt: ${prompt}\n\nDocument Text:\n${extractedText}` },
-            ]
-          }
-        ];
-      } else {
-        // Case 2: The PDF does NOT have a text layer (it's an image-based PDF).
-        // Fall back to converting it to an image for OCR.
-        console.log("No text layer found in PDF. Converting to image for OCR.");
-        
-        const poppler = new Poppler();
-        const options = {
-            firstPageToConvert: 1,
-            lastPageToConvert: 1,
-            jpegFile: false,
-            pngFile: true,
-        };
+    if (!parsedContent) throw new Error("No content returned by LlamaParse.");
 
-        const imageFilename = `temp-${Date.now()}`;
-        tempImagePath = path.join(tempDir, imageFilename);
+    // Truncate content if too long (Groq has token limits)
+    const maxContentLength = 10000;
+    const truncatedContent = parsedContent.length > maxContentLength 
+      ? parsedContent.substring(0, maxContentLength) + "... [content truncated]"
+      : parsedContent;
 
-        await poppler.pdfToPng(filePath, tempImagePath, options);
+    console.log('Sending to Groq...');
 
-        // Read the newly created image file
-        const imageBuffer = await fs.readFile(`${tempImagePath}-1.png`);
-        const base64Image = imageBuffer.toString("base64");
+    // Send to Groq
+    const messages = [
+      { role: "system", content: "You are a helpful assistant." },
+      { role: "user", content: `Instruction: '${prompt}'\n\nContent:\n${truncatedContent}` },
+    ];
 
-        messages = [
-          {
-            role: "system",
-            content: "You are a highly efficient text extraction assistant. Your sole purpose is to extract and return text from an image. You must not add any commentary, explanations, or conversational text. Your response should be nothing but the extracted text."
-          },
-          {
-            role: "user",
-            content: [
-              { type: "text", text: prompt },
-              {
-                type: "image_url",
-                // Pass the base64-encoded PNG as an image URL
-                image_url: { url: `data:image/png;base64,${base64Image}` }
-              }
-            ]
-          }
-        ];
-      }
-
-    } else if (file.mimetype.startsWith("image/")) {
-      // Logic for regular images remains the same
-      console.log("Processing image file...");
-      const imageBuffer = await fs.readFile(filePath);
-      const base64Image = imageBuffer.toString("base64");
-      
-      messages = [
-        {
-          role: "system",
-          content: "You are a highly efficient text extraction assistant. Your sole purpose is to extract and return text from an image. You must not add any commentary, explanations, or conversational text. Your response should be nothing but the extracted text."
-        },
-        {
-          role: "user",
-          content: [
-            { type: "text", text: prompt },
-            {
-              type: "image_url",
-              image_url: { url: `data:${file.mimetype};base64,${base64Image}` }
-            }
-          ]
-        }
-      ];
-    } else {
-      throw new Error("Unsupported file type.");
-    }
-    
-    const requestBody = {
-      model: "meta-llama/llama-4-scout-17b-16e-instruct",
-      messages: messages,
-      temperature: 0,
-      max_tokens: 1024,
-    };
-    
-    console.log("🚀 Sending request to Groq API...");
-
-    const groqResponse = await fetch(GROQ_API_ENDPOINT, {
+    const groqResp = await fetch("https://api.groq.com/openai/v1/chat/completions", {
       method: "POST",
-      headers: {
-        "Authorization": `Bearer ${GROQ_API_KEY}`,
-        "Content-Type": "application/json"
+      headers: { 
+        "Authorization": `Bearer ${process.env.GROQ_API_KEY}`, 
+        "Content-Type": "application/json" 
       },
-      body: JSON.stringify(requestBody),
+      body: JSON.stringify({ 
+        model: "llama3-70b-8192", 
+        messages, 
+        temperature: 0, 
+        max_tokens: 2048 
+      }),
     });
 
-    if (!groqResponse.ok) {
-      const errorText = await groqResponse.text();
-      throw new Error(`Groq API Error: ${groqResponse.status} - ${errorText}`);
+    const groqResponseText = await groqResp.text();
+    
+    if (!groqResp.ok) {
+      throw new Error(`Groq API error (${groqResp.status}): ${groqResponseText}`);
     }
 
-    const data = await groqResponse.json();
-    const outputText = data.choices?.[0]?.message?.content;
+    const data = JSON.parse(groqResponseText);
+    const outputText = data?.choices?.[0]?.message?.content || data?.choices?.[0]?.text || "";
 
     if (!outputText) {
-      throw new Error("Invalid response or missing content from Groq API.");
+      throw new Error("No output text received from Groq");
     }
 
-    res.json({ success: true, output: outputText });
-
-  } catch (error) {
-    next(error);
-  } finally {
+    // Cleanup
     if (filePath) {
       try {
         await fs.unlink(filePath);
-        console.log(`Cleaned up file: ${filePath}`);
-      } catch (err) {
-        if (err.code !== 'ENOENT') {
-          console.error(`Error cleaning up file ${filePath}:`, err);
-        }
+      } catch (e) {
+        console.error('File cleanup error:', e);
       }
     }
-    // Clean up temporary image file if it was created
-    if (tempImagePath) {
-      try {
-        await fs.unlink(`${tempImagePath}-1.png`);
-        console.log(`Cleaned up temporary image: ${tempImagePath}-1.png`);
-      } catch (err) {
-        if (err.code !== 'ENOENT') {
-          console.error(`Error cleaning up temporary image ${tempImagePath}-1.png}:`, err);
-        }
+
+    // Return JSON response
+    res.json({
+      success: true,
+      output: outputText
+    });
+
+  } catch (err) {
+    // Return error as JSON
+    console.error("Processing error:", err);
+    res.status(500).json({
+      success: false,
+      error: err.message
+    });
+  } finally {
+    // Ensure file cleanup even if there's an error
+    if (filePath) {
+      try { 
+        await fs.unlink(filePath); 
+      } catch (e) {
+        // Silent fail - file might already be deleted
       }
     }
   }
@@ -241,6 +239,4 @@ app.post("/api/process", upload.single("file"), async (req, res, next) => {
 app.use(errorHandler);
 
 const PORT = process.env.PORT || 5000;
-app.listen(PORT, () => {
-  console.log(`✅ Server running at http://localhost:${PORT}`);
-});
+app.listen(PORT, () => console.log(`✅ Server running at http://localhost:${PORT}`));
