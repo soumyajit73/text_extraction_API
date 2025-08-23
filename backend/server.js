@@ -99,32 +99,49 @@ const pollForResult = async (jobId) => {
     
     console.log(`Polling for job ${jobId} - Attempt ${attempts + 1}/${maxAttempts}`);
     
-    const response = await fetch(`https://api.cloud.llamaindex.ai/api/v1/parsing/job/${jobId}/result/markdown`, {
-      method: 'GET',
+    // 1. Check job status
+    const statusResp = await fetch(`https://api.cloud.llamaindex.ai/api/v1/parsing/job/${jobId}`, {
+      method: "GET",
       headers: {
-        'Authorization': `Bearer ${process.env.LLAMA_CLOUD_API_KEY}`,
+        "Authorization": `Bearer ${process.env.LLAMA_CLOUD_API_KEY}`,
       },
     });
 
-    if (response.ok) {
-      const result = await response.json();
-      console.log('Parsing completed!');
-      return result.markdown;
-    } else if (response.status === 400) {
-      const error = await response.json();
-      if (error.detail === 'Job not completed yet') {
-        attempts++;
-        continue;
-      } else {
-        throw new Error(`Error: ${JSON.stringify(error)}`);
-      }
-    } else {
-      const errorText = await response.text();
-      throw new Error(`Error checking job status (${response.status}): ${errorText}`);
+    if (!statusResp.ok) {
+      const text = await statusResp.text();
+      throw new Error(`Error checking job status (${statusResp.status}): ${text}`);
     }
+
+    const statusData = await statusResp.json();
+
+    if (statusData.status === "SUCCESS") {
+      // 2. Fetch result
+      const resultResp = await fetch(
+        `https://api.cloud.llamaindex.ai/api/v1/parsing/job/${jobId}/result/markdown`,
+        {
+          method: "GET",
+          headers: {
+            "Authorization": `Bearer ${process.env.LLAMA_CLOUD_API_KEY}`,
+          },
+        }
+      );
+
+      if (!resultResp.ok) {
+        const text = await resultResp.text();
+        throw new Error(`Error fetching result (${resultResp.status}): ${text}`);
+      }
+
+      const result = await resultResp.json();
+      console.log("Parsing completed!");
+      return result.markdown;
+    } else if (statusData.status === "FAILED") {
+      throw new Error("Parsing failed on LlamaParse");
+    }
+
+    attempts++;
   }
-  
-  throw new Error('Parsing timeout - job took too long to complete');
+
+  throw new Error("Parsing timeout - job took too long to complete");
 };
 
 // ---------- Error handler ----------
